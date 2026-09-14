@@ -4,7 +4,7 @@
 #include "webserver.h" 
 
 // ============================================================
-// MPU6050
+// DEFINICIONES
 // ============================================================
 
 #define SDA_PIN 4
@@ -12,18 +12,25 @@
 
 #define MPU6050_ADDR 0x68
 
+#define N 1024
+
 // ============================================================
-// FILTRO
+// Doble Buffer
 // ============================================================
 
-float alpha = 0.10;
+struct Data{
+    float Ax, Ay, Az;
+};
 
-float Ax_f = 0.0;
-float Ay_f = 0.0;
-float Az_f = 0.0;
+Data buffer[2][N];
+volatile uint8_t writeBufferIdx = 0;
+volatile uint8_t readBufferIdx  = 1;
+volatile bool bufferReady = false;
 
-// Mutex para sincronización entre núcleos
-SemaphoreHandle_t dataMutex;
+int sampleIndex = 0;
+
+// Mutex para el intercambio seguro del puntero de buffer
+SemaphoreHandle_t bufferMutex;
 
 // ============================================================
 // TAREA NÚCLEO 0: Wi-Fi y Servidor Web
@@ -46,27 +53,33 @@ void taskServerCore0(void *pvParameters) {
         server.send(200, "text/html", INDEX_HTML);
     });
 
+    // Devuelve la muestra representativa más reciente disponible
     server.on("/data", HTTP_GET, []() {
-        float x = 0.0, y = 0.0, z = 0.0;
+    uint8_t readyIdx = 0;
+    bool hasData = false;
 
-        // Lectura protegida con Mutex
-        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-            x = Ax_f;
-            y = Ay_f;
-            z = Az_f;
-            xSemaphoreGive(dataMutex);
-        }
+    if (xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        hasData = bufferReady;
+        readyIdx = readBufferIdx;
+        bufferReady = false; // Marcar como consumido hasta el siguiente swap
+        xSemaphoreGive(bufferMutex);
+    }
 
-        String data = String(x, 3) + "," + String(y, 3) + "," + String(z, 3);
-        server.send(200, "text/plain", data);
-    });
+    if (hasData) {
+        // Envía el bloque crudo de 1024 structs Data (12288 bytes)
+        server.send_P(200, "application/octet-stream", (const char*)buffer[readyIdx], sizeof(buffer[readyIdx]));
+    } else {
+        // El buffer todavía se está llenando
+        server.send(204); 
+    }
+});
 
     server.begin();
     Serial.println("Servidor HTTP iniciado en Núcleo 0");
 
     for (;;) {
         server.handleClient();
-        vTaskDelay(pdMS_TO_TICKS(2)); // Cede tiempo a la pila Wi-Fi de FreeRTOS
+        vTaskDelay(pdMS_TO_TICKS(2)); 
     }
 }
 
@@ -108,7 +121,7 @@ void setup() {
     delay(1000);
 
     // Inicialización del Mutex
-    dataMutex = xSemaphoreCreateMutex();
+    bufferMutex = xSemaphoreCreateMutex();
 
     // --------------------------------------------------------
     // I2C
@@ -142,7 +155,7 @@ void setup() {
 
     Wire.write(0x1A);
 
-    // DLPF ~44 Hz
+    // DLPF ~260 Hz
     Wire.write(0x00);
 
     Wire.endTransmission();
@@ -165,20 +178,27 @@ void setup() {
 
 
 // ============================================================
-// LOOP
+// LOOP (Núcleo 1 - Adquisición de datos)
 // ============================================================
-
 void loop() {
     float Ax, Ay, Az;
     readMPU6050(Ax, Ay, Az);
 
-    // Actualización protegida con Mutex
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-        Ax_f = Ax;//+= alpha * (Ax - Ax_f);
-        Ay_f = Ay;//+= alpha * (Ay - Ay_f);
-        Az_f = Az;//+= alpha * (Az - Az_f);
-        xSemaphoreGive(dataMutex);
+    // Escribir en el buffer actual
+    buffer[writeBufferIdx][sampleIndex] = {Ax, Ay, Az};
+    sampleIndex++;
+
+    // Si se llena el lote de 1024 muestras, intercambiar buffers
+    if (sampleIndex >= N) {
+        sampleIndex = 0;
+
+        if (xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            readBufferIdx = writeBufferIdx;            // El buffer lleno pasa a ser de lectura
+            writeBufferIdx = 1 - writeBufferIdx;       // Alternar entre 0 y 1 para escribir
+            bufferReady = true;
+            xSemaphoreGive(bufferMutex);
+        }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(10)); // Muestreo cada 10 ms (100 Hz)
+    vTaskDelay(pdMS_TO_TICKS(1)); // Muestreo cada 10 ms (100 Hz)
 }
