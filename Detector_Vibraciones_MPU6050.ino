@@ -13,6 +13,8 @@
 #define MPU6050_ADDR 0x68
 
 #define N 1024
+#define SAMPLING_FREQ   1000.0 // Frecuencia de muestreo en Hz (1 ms)
+#define SAMPLING_TS     1.0
 
 // ============================================================
 // Doble Buffer
@@ -88,26 +90,49 @@ void taskServerCore0(void *pvParameters) {
 // ============================================================
 
 void readMPU6050(float &Ax, float &Ay, float &Az) {
-
     Wire.beginTransmission(MPU6050_ADDR);
-
     Wire.write(0x3B);
-
     Wire.endTransmission(false);
-
     Wire.requestFrom(MPU6050_ADDR, 6, true);
 
     int16_t AcX = Wire.read() << 8 | Wire.read();
-
     int16_t AcY = Wire.read() << 8 | Wire.read();
-
     int16_t AcZ = Wire.read() << 8 | Wire.read();
-
 
     Ax = AcX / 16384.0;
     Ay = AcY / 16384.0;
     Az = AcZ / 16384.0;
+}
 
+// ============================================================
+// TAREA NÚCLEO 1: Muestreo e intercambio de buffers
+// ============================================================
+void taskSampleCore1(void *pvParameters) {
+    int sampleIndex = 0;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(SAMPLING_TS); // Muestreo periódico preciso
+
+    for (;;) {
+        float Ax, Ay, Az;
+        readMPU6050(Ax, Ay, Az);
+
+        buffer[writeBufferIdx][sampleIndex] = {Ax, Ay, Az};
+        sampleIndex++;
+
+        // Si se llena el lote, alternar buffers
+        if (sampleIndex >= N) {
+            sampleIndex = 0;
+            if (xSemaphoreTake(bufferMutex, portMAX_DELAY) == pdTRUE) {
+                readBufferIdx = writeBufferIdx;
+                writeBufferIdx = 1 - writeBufferIdx;
+                bufferReady = true;
+                xSemaphoreGive(bufferMutex);
+            }
+        }
+
+        // Mantiene una frecuencia constante de 1 ms compensando el tiempo de ejecución
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
 }
 
 // ============================================================
@@ -115,9 +140,7 @@ void readMPU6050(float &Ax, float &Ay, float &Az) {
 // ============================================================
 
 void setup() {
-
     Serial.begin(115200);
-
     delay(1000);
 
     // Inicialización del Mutex
@@ -150,14 +173,10 @@ void setup() {
     // --------------------------------------------------------
     // DLPF MPU6050
     // --------------------------------------------------------
-
     Wire.beginTransmission(MPU6050_ADDR);
-
     Wire.write(0x1A);
-
     // DLPF ~260 Hz
     Wire.write(0x00);
-
     Wire.endTransmission();
 
     // --------------------------------------------------------
@@ -174,31 +193,26 @@ void setup() {
         NULL,               // Manejador
         0                   // Núcleo 0
     );
+
+    // --------------------------------------------------------
+    // Tarea de adquisición
+    // --------------------------------------------------------
+    xTaskCreatePinnedToCore(
+        taskSampleCore1,    // Función que ejecuta la tarea
+        "TaskSampleCore1",  // Nombre
+        4096,               // Tamaño del stack (bytes/palabras según config)
+        NULL,               // Parámetros
+        1,                  // Prioridad
+        NULL,               // Manejador
+        1                   // Núcleo 0
+    );
 }
 
 
 // ============================================================
-// LOOP (Núcleo 1 - Adquisición de datos)
+// LOOP
 // ============================================================
 void loop() {
-    float Ax, Ay, Az;
-    readMPU6050(Ax, Ay, Az);
-
-    // Escribir en el buffer actual
-    buffer[writeBufferIdx][sampleIndex] = {Ax, Ay, Az};
-    sampleIndex++;
-
-    // Si se llena el lote de 1024 muestras, intercambiar buffers
-    if (sampleIndex >= N) {
-        sampleIndex = 0;
-
-        if (xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-            readBufferIdx = writeBufferIdx;            // El buffer lleno pasa a ser de lectura
-            writeBufferIdx = 1 - writeBufferIdx;       // Alternar entre 0 y 1 para escribir
-            bufferReady = true;
-            xSemaphoreGive(bufferMutex);
-        }
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(1)); // Muestreo cada 10 ms (100 Hz)
+    // Toda la ejecución se delegó a tareas FreeRTOS dedicadas
+    vTaskDelete(NULL); // Elimina la tarea loop() para liberar memoria de stack
 }
