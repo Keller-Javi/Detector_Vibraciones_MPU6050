@@ -33,7 +33,7 @@ float vImag[N];
 
 // Buffer final listo para ser consumido por el servidor web
 Data finalSignal[N];
-float finalFFT[N / 2];        // La FFT simétrica solo requiere N/2 bins útiles
+Data finalFFT[N / 2];        // La FFT simétrica solo requiere N/2 bins útiles
 volatile bool webDataReady = false;
 
 // Sincronización FreeRTOS
@@ -134,29 +134,21 @@ void taskSampleCore1(void *pvParameters) {
 }
 
 // ============================================================
-// CORE 1: Tarea 2 - Cálculo de FFT (Prioridad Media: 2)
+// CORE 1: Cálculo de FFT para Ax, Ay y Az (Prioridad 2)
 // ============================================================
 void taskFFTCore1(void *pvParameters) {
     for (;;) {
-        // Espera bloqueado hasta que taskSampleCore1 llene un buffer
         if (xSemaphoreTake(semStartFFT, portMAX_DELAY) == pdTRUE) {
-            uint8_t processIdx = 1 - writeBufferIdx; // Buffer recién llenado
+            uint8_t processIdx = 1 - writeBufferIdx;
 
-            // 1. Preparar vectores para FFT (ejemplo analizando vibración en Az)
-            for (int i = 0; i < N; i++) {
-                vReal[i] = rawBuffer[processIdx][i].Ay;
-                vImag[i] = 0.0f;
-            }
+            // Calcular FFT para cada componente secuencialmente
+            computeAxisFFT(nullptr, 0, processIdx); // Ax
+            computeAxisFFT(nullptr, 1, processIdx); // Ay
+            computeAxisFFT(nullptr, 2, processIdx); // Az
 
-            // 2. Ejecutar procesamiento espectral
-            FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
-            FFT.compute(FFTDirection::Forward);
-            FFT.complexToMagnitude();
-
-            // 3. Copiar resultados protegidos por Mutex para el Core 0
+            // Copiar la señal temporal al buffer final
             if (xSemaphoreTake(webMutex, portMAX_DELAY) == pdTRUE) {
                 memcpy(finalSignal, (void*)rawBuffer[processIdx], sizeof(finalSignal));
-                memcpy(finalFFT, vReal, sizeof(finalFFT)); // Copia los primeros N/2 magnitudes
                 webDataReady = true;
                 xSemaphoreGive(webMutex);
             }
@@ -275,4 +267,26 @@ void readMPU6050(float &Ax, float &Ay, float &Az) {
     Ax = AcX / 16384.0;
     Ay = AcY / 16384.0;
     Az = AcZ / 16384.0;
+}
+
+// ============================================================
+// FUNCIÓN AXILIAR DE CALCULO DE FFT
+// ============================================================
+void computeAxisFFT(float* targetOutput, int offsetData, uint8_t bufferIdx) {
+    for (int i = 0; i < N; i++) {
+        // Offset: 0 para Ax, 1 para Ay, 2 para Az
+        float* samplePtr = (float*)&rawBuffer[bufferIdx][i];
+        vReal[i] = *(samplePtr + offsetData);
+        vImag[i] = 0.0f;
+    }
+
+    FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+    FFT.compute(FFTDirection::Forward);
+    FFT.complexToMagnitude();
+
+    // Guardar las primeras N/2 magnitudes en el arreglo final
+    for (int i = 0; i < N / 2; i++) {
+        float* outPtr = (float*)&finalFFT[i];
+        *(outPtr + offsetData) = vReal[i];
+    }
 }
