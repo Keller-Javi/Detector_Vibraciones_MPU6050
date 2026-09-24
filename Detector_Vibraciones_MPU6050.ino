@@ -4,19 +4,6 @@
 #include "webserver.h" 
 
 // ============================================================
-// DEFINICIONES
-// ============================================================
-
-#define SDA_PIN 4
-#define SCL_PIN 5
-
-#define MPU6050_ADDR 0x68
-
-#define N 1024
-#define SAMPLING_FREQ   1000.0 // Frecuencia de muestreo en Hz (1 ms)
-#define SAMPLING_TS     1.0
-
-// ============================================================
 // Doble Buffer
 // ============================================================
 
@@ -111,7 +98,7 @@ void taskServerCore0(void *pvParameters) {
 void taskSampleCore1(void *pvParameters) {
     int sampleIndex = 0;
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(1); // 1000 Hz exactos
+    const TickType_t xFrequency = pdMS_TO_TICKS(SAMPLING_TS);
 
     for (;;) {
         float Ax, Ay, Az;
@@ -120,7 +107,7 @@ void taskSampleCore1(void *pvParameters) {
         rawBuffer[writeBufferIdx][sampleIndex] = {Ax, Ay, Az};
         sampleIndex++;
 
-        // Si se completaron las 1024 muestras (~1.024 segundos)
+        // Si se completaron las muestras
         if (sampleIndex >= N) {
             sampleIndex = 0;
             writeBufferIdx = 1 - writeBufferIdx; // Cambia al otro buffer de inmediato
