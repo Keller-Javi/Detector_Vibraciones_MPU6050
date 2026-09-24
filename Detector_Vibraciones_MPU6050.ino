@@ -260,18 +260,33 @@ void readMPU6050(float &Ax, float &Ay, float &Az) {
 // FUNCIÓN AXILIAR DE CALCULO DE FFT
 // ============================================================
 void computeAxisFFT(float* targetOutput, int offsetData, uint8_t bufferIdx) {
+    // -----------------------------------------------------------
+    // Paso 1: Calcular la media del bloque (Componente DC / Offset)
+    // -----------------------------------------------------------
+    float sum = 0.0f;
     for (int i = 0; i < N; i++) {
-        // Offset: 0 para Ax, 1 para Ay, 2 para Az
         float* samplePtr = (float*)&rawBuffer[bufferIdx][i];
-        vReal[i] = *(samplePtr + offsetData);
+        sum += *(samplePtr + offsetData);
+    }
+    float mean = sum / (float)N;
+
+    // -----------------------------------------------------------
+    // Paso 2: Cargar el vector vReal restando la media
+    // -----------------------------------------------------------
+    for (int i = 0; i < N; i++) {
+        float* samplePtr = (float*)&rawBuffer[bufferIdx][i];
+        vReal[i] = *(samplePtr + offsetData) - mean; // Señal centrada en 0g
         vImag[i] = 0.0f;
     }
 
+    // -----------------------------------------------------------
+    // Paso 3: Ventaneo y cálculo espectral
+    // -----------------------------------------------------------
     FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
     FFT.compute(FFTDirection::Forward);
     FFT.complexToMagnitude();
 
-    // Guardar las primeras N/2 magnitudes en el arreglo final
+    // Guardar las primeras N/2 magnitudes
     for (int i = 0; i < N / 2; i++) {
         float* outPtr = (float*)&finalFFT[i];
         *(outPtr + offsetData) = vReal[i];
